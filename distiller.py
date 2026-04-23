@@ -25,7 +25,8 @@ class Distiller(nn.Module):
         self.device = device
         self.student_model_type = args.model_type
         self.student_model, self.student_tokenizer = self.load_student_model()
-        
+        if self.args.student_model_for_sft is not None:
+            self.student_model_for_sft = self.load_student_model_for_sft()
         if self.args.teacher_model_path is not None:
             self.teacher_model, self.teacher_tokenizers = self.load_teacher_model()
         else:
@@ -37,6 +38,16 @@ class Distiller(nn.Module):
             log_rank(f"projector structure: {self.projectors}")
         
         if args.task.startswith("SEDI"):
+            Q = init_mapping(self.args)
+            self.Q = Q.to(device)
+            self.entropy_adapter = nn.Parameter(torch.ones(Q.shape[1]))
+
+        if args.task.startswith("SFT_SEDI"):
+            Q = init_mapping(self.args)
+            self.Q = Q.to(device)
+            self.entropy_adapter = nn.Parameter(torch.ones(Q.shape[1]))
+
+        if args.task.startswith("SFT_KL"):
             Q = init_mapping(self.args)
             self.Q = Q.to(device)
             self.entropy_adapter = nn.Parameter(torch.ones(Q.shape[1]))
@@ -92,6 +103,8 @@ class Distiller(nn.Module):
                            help='path for the vocab alignment file (id, student-to-teacher)')
         group.add_argument("--K", type=int, default=100,
                            help='top-K tokens')
+        group.add_argument("--student-model-for-sft", type=str, default=None,
+                           help="path to the SFT student model used for candidate proposal")
         return parser
     
     def load_tokenizer(self, model_type, path):
@@ -117,7 +130,6 @@ class Distiller(nn.Module):
             # for d in projector_config[loc]:
             if projector_config[projector_name]["enabled"]:
                 self.projectors[projector_name] = nn.Sequential()
-
                 structure = projector_config[projector_name]["structure"].split("-")
                 for i in range(len(structure)):
                     if structure[i] not in ["relu"]:
@@ -166,19 +178,35 @@ class Distiller(nn.Module):
                     continue
         else:
             log_rank("No existing projector.")
+
+    def load_student_model_for_sft(self):
+        log_rank("Loading student model for SFT proposal...")
+
+        config = AutoConfig.from_pretrained(self.args.student_model_for_sft, trust_remote_code=True)
+        config.is_model_parallel = False
+
+        model = AutoModelForCausalLM.from_pretrained(
+            self.args.student_model_for_sft,
+            config=config,
+            device_map=None,
+            torch_dtype=self.dtype,
+            trust_remote_code=True,
+        )
+
+        for p in model.parameters():
+            p.requires_grad = False
+
+        model.eval()
+        return model
     
+
     def load_student_model(self):
         log_rank("Loading student model...")
         config = AutoConfig.from_pretrained(self.args.model_path, trust_remote_code=True)
         config.is_model_parallel = False
 
         tokenizer = self.load_tokenizer(self.args.model_type, self.args.model_path)
-        
-        if hasattr(config, "n_embed"):
-            self.student_hidden_size = config.n_embed
-        else:
-            self.student_hidden_size = config.hidden_size
-        
+
         if self.args.model_dtype == "fp32":
             self.dtype = torch.float32
         elif self.args.model_dtype == "bf16":
@@ -186,16 +214,33 @@ class Distiller(nn.Module):
         elif self.args.model_dtype == "fp16":
             self.dtype = torch.float16
         else:
-            raise NotImplementedError("Invalid model_dtype for f`{self.args.model_dtype}`")
-        
+            raise NotImplementedError(f"Invalid model_dtype for `{self.args.model_dtype}`")
+
         model = AutoModelForCausalLM.from_pretrained(
-            self.args.model_path, 
-            config=config, 
-            device_map=None, 
+            self.args.model_path,
+            config=config,
+            device_map=None,
             torch_dtype=self.dtype,
             trust_remote_code=True,
         )
-        
+
+        # use actual embedding dim for projector construction
+        if hasattr(model, "model") and hasattr(model.model, "decoder") and hasattr(model.model.decoder, "embed_tokens"):
+            self.student_hidden_size = model.model.decoder.embed_tokens.weight.shape[1]
+        elif hasattr(model, "model") and hasattr(model.model, "embed_tokens"):
+            self.student_hidden_size = model.model.embed_tokens.weight.shape[1]
+        elif hasattr(model, "transformer") and hasattr(model.transformer, "wte"):
+            self.student_hidden_size = model.transformer.wte.weight.shape[1]
+        elif hasattr(model, "gpt_neox") and hasattr(model.gpt_neox, "embed_in"):
+            self.student_hidden_size = model.gpt_neox.embed_in.weight.shape[1]
+        else:
+            if hasattr(config, "n_embed"):
+                self.student_hidden_size = config.n_embed
+            else:
+                self.student_hidden_size = config.hidden_size
+
+        print("student_hidden_size used for projector =", self.student_hidden_size)
+
         if self.args.peft is not None:
             if self.args.peft == "lora":
                 model.enable_input_require_grads()
@@ -204,10 +249,10 @@ class Distiller(nn.Module):
                         _model = PeftModel.from_pretrained(model, self.args.peft_path)
                         state_dict = dict(_model.state_dict().items())
                         peft_config = LoraConfig(
-                            task_type=TaskType.CAUSAL_LM, 
-                            inference_mode=(not self.args.do_train), 
-                            r=self.args.peft_lora_r, 
-                            lora_alpha=self.args.peft_lora_alpha, 
+                            task_type=TaskType.CAUSAL_LM,
+                            inference_mode=(not self.args.do_train),
+                            r=self.args.peft_lora_r,
+                            lora_alpha=self.args.peft_lora_alpha,
                             lora_dropout=self.args.peft_lora_dropout
                         )
                         model = get_peft_model(model, peft_config)
@@ -218,10 +263,10 @@ class Distiller(nn.Module):
                         model = PeftModel.from_pretrained(model, self.args.peft_path)
                 else:
                     peft_config = LoraConfig(
-                        task_type=TaskType.CAUSAL_LM, 
-                        inference_mode=(not self.args.do_train), 
-                        r=self.args.peft_lora_r, 
-                        lora_alpha=self.args.peft_lora_alpha, 
+                        task_type=TaskType.CAUSAL_LM,
+                        inference_mode=(not self.args.do_train),
+                        r=self.args.peft_lora_r,
+                        lora_alpha=self.args.peft_lora_alpha,
                         lora_dropout=self.args.peft_lora_dropout
                     )
                     model = get_peft_model(model, peft_config)

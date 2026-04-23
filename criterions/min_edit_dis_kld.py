@@ -11,6 +11,7 @@ import inspect
 
 TOKENIZER_TO_SPECIAL_TOKEN = {
     transformers.LlamaTokenizer: "▁",
+    transformers.LlamaTokenizerFast: "▁",
     transformers.GPTNeoXTokenizerFast: "Ġ",
     transformers.GPT2Tokenizer: "Ġ",
     transformers.GPT2TokenizerFast: "Ġ",

@@ -1,0 +1,10 @@
+*.pt
+*.bin
+*.ckpt
+*.pth
+outputs/
+checkpoints/
+logs/
+*.jsonl
+*.csv
+__pycache__/

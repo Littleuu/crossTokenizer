@@ -18,11 +18,7 @@
         "enabled": false
     },
     "bf16": {
-        "enabled": true,
-        "loss_scale": 0,
-        "initial_scale_power": 11,
-        "loss_scale_window": 5000,
-        "hysteresis": 4
+        "enabled": true
     },
     "wall_clock_breakdown": false
 }

@@ -31,8 +31,9 @@ logger = get_logger(__name__)
 TOKENIZER_TO_SPECIAL_TOKEN = {
     transformers.LlamaTokenizer: "▁",
     transformers.GPTNeoXTokenizerFast: "Ġ",
-    transformers.models.qwen2.tokenization_qwen2.Qwen2Tokenizer:"Ġ",
-    transformers.models.gpt2.tokenization_gpt2_fast.GPT2TokenizerFast: "Ġ"
+    transformers.models.qwen2.tokenization_qwen2.Qwen2Tokenizer: "Ġ",
+    transformers.models.gpt2.tokenization_gpt2_fast.GPT2TokenizerFast: "Ġ",
+    transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer: "Ġ",
 }
 
 def get_tokenizer(model_name_or_path, cache_dir, model_max_length):
@@ -129,10 +130,11 @@ def find_best_mapping(
         mode=None,
     ):  
         tmp_x = x.replace(blending_model_special_token, base_model_special_token)
-        if tmp_x == base_tokens:
+        if tmp_x in base_tokens:
             return x, tmp_x
         else:
             if mode == "exact_match":
+                # print("--------------------------------")
                 return x, ""
             if best_one:
                 return x, min(
@@ -222,7 +224,7 @@ if __name__ == "__main__":
 
     with multiprocessing.Pool(64) as pool:
         mapping_args = [
-            (x, base_tokens, blending_model_special_token, base_model_special_token)
+            (x, base_tokens, blending_model_special_token, base_model_special_token, True, args.mode)
             for x in blending_tokens
         ]
         results = list(

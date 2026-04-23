@@ -1,0 +1,9 @@
+dev | {'loss': 2.448517, 'token_num': 23901, 'token_acc': 0.505376, 'top1_prob': 0.532802} | {'exact_match': 2.3333, 'rougeL': 19.0641, 'f1': 15.729, 'bleu': 4.2781, 'fluency': 4.7315}
+dev | {'loss': 2.472177, 'token_num': 23901, 'token_acc': 0.504372, 'top1_prob': 0.557696} | {'exact_match': 3.1111, 'rougeL': 22.0642, 'f1': 18.4746, 'bleu': 6.117, 'fluency': 4.7757}
+dev | {'loss': 2.497113, 'token_num': 23901, 'token_acc': 0.506799, 'top1_prob': 0.564025} | {'exact_match': 3.1111, 'rougeL': 20.913, 'f1': 17.1316, 'bleu': 5.8038, 'fluency': 4.9979}
+dev | {'loss': 2.508577, 'token_num': 23901, 'token_acc': 0.50592, 'top1_prob': 0.57051} | {'exact_match': 2.0, 'rougeL': 20.2228, 'f1': 16.9978, 'bleu': 4.9685, 'fluency': 5.1645}
+dev | {'loss': 2.532697, 'token_num': 23901, 'token_acc': 0.504414, 'top1_prob': 0.58713} | {'exact_match': 2.3333, 'rougeL': 21.3625, 'f1': 17.4891, 'bleu': 5.8663, 'fluency': 4.599}
+dev | {'loss': 2.582402, 'token_num': 23901, 'token_acc': 0.503159, 'top1_prob': 0.608039} | {'exact_match': 3.2222, 'rougeL': 22.9925, 'f1': 19.1156, 'bleu': 6.8059, 'fluency': 4.8283}
+dev | {'loss': 2.597548, 'token_num': 23901, 'token_acc': 0.502824, 'top1_prob': 0.61146} | {'exact_match': 3.6667, 'rougeL': 23.4843, 'f1': 19.3015, 'bleu': 6.8118, 'fluency': 4.9109}
+dev | {'loss': 2.614368, 'token_num': 23901, 'token_acc': 0.501653, 'top1_prob': 0.613458} | {'exact_match': 4.3333, 'rougeL': 23.8105, 'f1': 19.653, 'bleu': 7.3615, 'fluency': 4.82}
+dev | {'loss': 2.630183, 'token_num': 23901, 'token_acc': 0.501736, 'top1_prob': 0.616397} | {'exact_match': 3.6667, 'rougeL': 23.891, 'f1': 19.837, 'bleu': 7.042, 'fluency': 4.9093}

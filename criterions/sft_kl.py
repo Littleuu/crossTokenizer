@@ -239,7 +239,141 @@ def detect_next_token(K, mask_id, tokenizer_A, tokenizer_B, stu_label_ids, tea_l
         tokenizer_aligned_teacher_logit = teacher_logits[tea_idx]
     return aligned_vec, tokenizer_aligned_teacher_logit
 
-def sliding_window_align_onlyQ(args,K, mask_id, tokenizer_A, tokenizer_B, stu_label_ids, tea_label_ids, alignment, student_per_step_logit, teacher_logits, teacher_logits_projected, teacher_special_token, student_special_token, align_idx0):
+def longest_common_prefix_len(a, b):
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+def group_rerank_builder(args, K, mask_id, tokenizer_A, tokenizer_B, stu_label_ids, tea_label_ids,
+    stu_ids, tea_ids, group_index, full_alignment, student_per_step_logit, teacher_logits,
+    teacher_logits_projected, teacher_special_token, student_special_token, align_idx0, student_model, sft_per_step_logit, stu_context_ids):
+
+    group_aligned_vecs = []
+    group_teacher_logits = []
+
+    device = teacher_logits.device
+    group_len = len(stu_ids)
+
+    gt_teacher_ids = [int(tea_label_ids[idx]) for idx in tea_ids]
+    gt_teacher_tokens = tokenizer_B.convert_ids_to_tokens(gt_teacher_ids)
+
+    gt_student_ids = [int(stu_label_ids[idx]) for idx in stu_ids]
+    gt_student_tokens = tokenizer_A.convert_ids_to_tokens(gt_student_ids)
+    
+    # print("Ground truth student group tokens:", gt_student_tokens)
+    # print("Ground truth teacher group tokens:", gt_teacher_tokens)
+
+    group_tokens_info = []
+
+    # 防止 K 超过词表大小
+    K = min(K, sft_per_step_logit.size(-1))
+
+    for pos in range(group_len):
+        fixed_student_prefix_ids = list(stu_context_ids) + [int(stu_label_ids[idx]) for idx in stu_ids[:pos]]
+
+        cur_seq_pos = len(stu_context_ids) + pos
+        topk_vals, topk_ids = torch.topk(sft_per_step_logit[cur_seq_pos], k=K, dim=-1)
+
+        valid_candidates = [] 
+
+        for cand_id in topk_ids.tolist():
+            cur_student_ids = fixed_student_prefix_ids + [cand_id]
+
+            for _ in range(group_len - pos - 1):
+                input_ids = torch.tensor(cur_student_ids, dtype=torch.long, device=device).unsqueeze(0)
+                attention_mask = torch.ones_like(input_ids)
+
+                with torch.no_grad():
+                    outputs = student_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask
+                    )
+                    next_logits = outputs.logits[0, -1, :]
+                    next_id = torch.argmax(next_logits, dim=-1).item()
+
+                cur_student_ids.append(next_id)
+
+            group_student_ids = cur_student_ids[len(stu_context_ids):]
+            group_text = tokenizer_A.decode(group_student_ids, skip_special_tokens=True)
+            # print("Student rollout group tokens:", group_text)
+            group_teacher_ids = tokenizer_B.encode(group_text, add_special_tokens=False)
+
+            if len(group_teacher_ids) == 0:
+                continue
+
+            common_len = longest_common_prefix_len(gt_teacher_ids, group_teacher_ids)
+
+            if common_len >= len(group_teacher_ids):
+                mapped_pos = len(group_teacher_ids) - 1
+            else:
+                mapped_pos = common_len
+
+            # 这里 mapped_pos 是 group_teacher_ids 的局部位置
+            if mapped_pos >= len(group_teacher_ids):
+                mapped_pos = len(group_teacher_ids) - 1
+
+            mapped_tid = group_teacher_ids[mapped_pos]
+
+            if mapped_tid >= teacher_logits.size(-1):
+                continue
+
+            # teacher 全局位置，要加 tea_ids[0]，并且要防越界
+            teacher_abs_pos = min(tea_ids[0] + mapped_pos - 1, teacher_logits.size(0) - 1)
+
+            score = teacher_logits[teacher_abs_pos][mapped_tid]
+            valid_candidates.append((cand_id, score, mapped_pos))
+        
+        #     topk_teacher_vals, topk_teacher_ids = torch.topk(teacher_logits[teacher_abs_pos], k=K, dim=-1)
+        #     teacher_topk_tokens = tokenizer_B.convert_ids_to_tokens(topk_teacher_ids.tolist())
+        #     teacher_topk_logits = topk_teacher_vals.tolist()
+        #     teacher_abs_pos_for_print = teacher_abs_pos
+
+        # group_tokens_info.append({
+        #     "pos": pos,
+        #     "sft_topk_tokens": [tokenizer_A.convert_ids_to_tokens(tid) for tid in topk_ids.tolist()],
+        #     "sft_topk_logits": topk_vals.tolist(),
+        #     "student_rollout_tokens": tokenizer_A.convert_ids_to_tokens(group_student_ids),
+        #     "teacher_mapped_tokens": tokenizer_B.convert_ids_to_tokens(group_teacher_ids) if len(group_teacher_ids) > 0 else [],
+        #     "teacher_abs_pos": teacher_abs_pos_for_print,
+        #     "teacher_topk_tokens": teacher_topk_tokens,
+        #     "teacher_topk_logits": teacher_topk_logits,
+        # })
+
+
+        aligned_vec = torch.full_like(student_per_step_logit[0], float(mask_id))
+
+        # 不管 valid_candidates 是否为空，fallback 都应该是 teacher 全局位置
+        fallback_pos = min(tea_ids[0] + pos, teacher_logits.size(0) - 1)
+        tokenizer_aligned_teacher_logit = teacher_logits[fallback_pos]
+
+        if len(valid_candidates) > 0:
+            for cand_id, score, _ in valid_candidates:
+                aligned_vec[cand_id] = score
+
+        group_aligned_vecs.append(aligned_vec.unsqueeze(0))
+        group_teacher_logits.append(tokenizer_aligned_teacher_logit.unsqueeze(0))
+
+    group_aligned_vecs = torch.cat(group_aligned_vecs, dim=0)
+    group_teacher_logits = torch.cat(group_teacher_logits, dim=0)
+
+    # print("\n=== Group Tokens Info ===")
+    # for info in group_tokens_info:
+    #     print(f"Position {info['pos']}:")
+    #     print("  SFT top-k tokens:", info["sft_topk_tokens"])
+    #     print("  SFT top-k logits:", [round(v, 4) for v in info["sft_topk_logits"]])
+    #     print("  Student rollout tokens:", info["student_rollout_tokens"])
+    #     print("  Teacher mapped tokens:", info["teacher_mapped_tokens"])
+    #     print("  Teacher abs pos:", info["teacher_abs_pos"])
+    #     print("  Teacher top-k tokens:", info["teacher_topk_tokens"])
+    #     print("  Teacher top-k logits:", [round(v, 4) for v in info["teacher_topk_logits"]])
+    #     print("-" * 40)
+
+    return group_aligned_vecs, group_teacher_logits
+
+
+def sliding_window_align_onlyQ(args,K, mask_id, tokenizer_A, tokenizer_B, stu_label_ids, tea_label_ids, alignment, student_per_step_logit, teacher_logits, teacher_logits_projected, teacher_special_token, student_special_token, align_idx0, student_model, sft_per_step_logit):
     aligned_logits = []
     tokenizer_aligned_teacher_logits = []
     tot = 0
@@ -263,76 +397,55 @@ def sliding_window_align_onlyQ(args,K, mask_id, tokenizer_A, tokenizer_B, stu_la
 
         if len(stu_ids) == 1 and len(tea_ids) == 1:
             tea_idx = tea_ids[0]
-        elif len(stu_ids) == 1 and len(tea_ids) > 1:
-            tea_idx = tea_ids[-1]
-        elif len(stu_ids) > 1:
-            tea_idx = tea_ids[-1]
-            prev_aligned_vec = torch.full_like(back_logit[stu_ids[:-1]], mask_id)
-            if len(tea_ids) > 1:
-                prev_token_list = tokenizer_B.convert_ids_to_tokens(tea_label_ids[tea_ids[:-1]])
-                prev_token = "".join(prev_token_list)
-                if tea_ids[0] == 0 and prev_token != teacher_special_token:
-                    prev_token = re.sub(f"^{teacher_special_token}", "", prev_token)
-                else:
-                    prev_token = re.sub(f"^{teacher_special_token}", student_special_token, prev_token)
-                topk_values, topk_indices = torch.topk(teacher_logits[tea_ids[-2]], k=K, dim=-1)
-                token_ids = topk_indices.tolist()
-                scores = topk_values.tolist()
-                for j in range(K):
-                    cur_tea_token = tokenizer_B.convert_ids_to_tokens(token_ids[j])
-                    cur_tea_token = re.sub(f"^{teacher_special_token}", student_special_token, cur_tea_token)
-                    combine_token = prev_token + cur_tea_token
-                    corres_stu_token_id = tokenizer_A.convert_tokens_to_ids(combine_token)
-                    if corres_stu_token_id != tokenizer_A.unk_token_id:
-                        if prev_aligned_vec[0,corres_stu_token_id] == mask_id:
-                            prev_aligned_vec[0,corres_stu_token_id] = scores[j]
-                    else:
-                        convert_token_ = re.sub(f"^{student_special_token}", " ", combine_token)
-                        new_id = tokenizer_A.encode(convert_token_, add_special_tokens=False)
-                        if len(new_id) == 1:
-                            if prev_aligned_vec[0,corres_stu_token_id] == mask_id:
-                                prev_aligned_vec[0,corres_stu_token_id] = scores[j]
-                        else:
-                            for i in range(len(stu_ids)-1):
-                                if (i+1) < len(new_id):
-                                    if prev_aligned_vec[i, new_id[i+1]] == mask_id:
-                                        prev_aligned_vec[i, new_id[i+1]] = scores[j]
-                tokenizer_aligned_teacher_logits += [teacher_logits[tea_ids[-2]].unsqueeze(0)] * (len(stu_ids) - 1)
-            elif len(tea_ids) == 1:
-                prev_token = ""
-                if prev_tea_ids:
-                    topk_values, topk_indices = torch.topk(teacher_logits[prev_tea_ids[-1]], k=K, dim=-1)
-                    tokenizer_aligned_teacher_logits += [teacher_logits[prev_tea_ids[-1]].unsqueeze(0)] * (len(stu_ids) - 1)
-                else:
-                    topk_values, topk_indices = torch.topk(align_idx0[0], k=K, dim=-1)
-                    tokenizer_aligned_teacher_logits += [align_idx0[0].unsqueeze(0)] * (len(stu_ids) - 1)
-                token_ids = topk_indices.tolist()
-                scores = topk_values.tolist()
-                for j in range(K):
-                    cur_tea_token = tokenizer_B.convert_ids_to_tokens(token_ids[j])
-                    if tea_ids[0] == 0 and cur_tea_token != teacher_special_token:
-                        cur_tea_token = re.sub(f"^{teacher_special_token}", "", cur_tea_token)
-                    else:
-                        cur_tea_token = re.sub(f"^{teacher_special_token}", student_special_token, cur_tea_token)
-                    combine_token = prev_token + cur_tea_token
-                    convert_token_ = re.sub(f"^{student_special_token}", " ", combine_token)
-                    new_id = tokenizer_A.encode(convert_token_, add_special_tokens=False)
-                    if len(new_id) > 1:
-                        for i in range(len(stu_ids)-1):
-                            if (i+1) < len(new_id):
-                                if prev_aligned_vec[i, new_id[i+1]] == mask_id:
-                                    prev_aligned_vec[i, new_id[i+1]] = scores[j]
-            aligned_logits.append(prev_aligned_vec)
-        aligned_vec, tokenizer_aligned_teacher_logit = detect_next_token(K, mask_id, tokenizer_A, tokenizer_B, stu_label_ids, tea_label_ids, tea_idx, next_stu_ids, next_tea_ids, student_per_step_logit, \
-            teacher_logits, teacher_logits_projected, align_idx0, teacher_special_token, student_special_token, start=False)            
-        aligned_logits.append(aligned_vec.unsqueeze(0))
-        tokenizer_aligned_teacher_logits.append(tokenizer_aligned_teacher_logit.unsqueeze(0))
+            aligned_vec, tokenizer_aligned_teacher_logit = detect_next_token(K, mask_id, tokenizer_A, tokenizer_B, stu_label_ids, tea_label_ids, tea_idx, next_stu_ids, next_tea_ids, student_per_step_logit, \
+                teacher_logits, teacher_logits_projected, align_idx0, teacher_special_token, student_special_token, start=False)            
+            aligned_logits.append(aligned_vec.unsqueeze(0))
+            tokenizer_aligned_teacher_logits.append(tokenizer_aligned_teacher_logit.unsqueeze(0))
+            continue
+        
+
+        stu_context_ids = []
+        for prev_g in range(g):
+            prev_stu_ids, _ = alignment[prev_g]
+            stu_context_ids.extend([int(stu_label_ids[idx]) for idx in prev_stu_ids])
+
+        group_student_logits, group_pseudo_logits = group_rerank_builder(
+            args=args,
+            K=40,
+            mask_id=mask_id,
+            tokenizer_A=tokenizer_A,  
+            tokenizer_B=tokenizer_B,   
+            stu_label_ids=stu_label_ids,
+            tea_label_ids=tea_label_ids,
+            stu_ids=stu_ids,
+            tea_ids=tea_ids,
+            group_index=g,
+            full_alignment=alignment,
+            student_per_step_logit=student_per_step_logit,
+            teacher_logits=teacher_logits,
+            teacher_logits_projected=teacher_logits_projected,
+            teacher_special_token=teacher_special_token,
+            student_special_token=student_special_token,
+            align_idx0=align_idx0,
+            student_model=student_model,
+            sft_per_step_logit=sft_per_step_logit, 
+            stu_context_ids=stu_context_ids,
+        )
+
+        if group_student_logits.dim() == 1:
+            group_student_logits = group_student_logits.unsqueeze(0)
+        if group_pseudo_logits.dim() == 1:
+            group_pseudo_logits = group_pseudo_logits.unsqueeze(0)
+
+        aligned_logits.append(group_student_logits)
+        tokenizer_aligned_teacher_logits.append(group_pseudo_logits)
+
     aligned_output = torch.cat(aligned_logits, dim=0)
     tokenizer_aligned_output = torch.cat(tokenizer_aligned_teacher_logits, dim=0)
     return aligned_output, tokenizer_aligned_output
 
 
-class SEDILogitDistillation(CrossEntropyLoss):
+class SFTKLDistillation(CrossEntropyLoss):
     def __init__(self, args, padding_id=-100) -> None:
         super().__init__(args, padding_id=padding_id)
         self.kd_rate = args.kd_rate
@@ -351,6 +464,7 @@ class SEDILogitDistillation(CrossEntropyLoss):
     ):
         model = distiller.student_model
         teacher_model = distiller.teacher_model
+        student_model_for_sft = distiller.student_model_for_sft
         self.distiller = distiller
         
         if "position_ids" in inspect.signature(model.forward).parameters:
@@ -376,12 +490,19 @@ class SEDILogitDistillation(CrossEntropyLoss):
                 position_ids=input_data.get(f"teacher_{distiller.teacher_model_type}_position_ids", None), 
                 output_hidden_states=True
             )
-            
+
+        with torch.no_grad():
+            sft_outputs = student_model_for_sft(
+                input_ids=input_data["input_ids"],
+                attention_mask=input_data["attention_mask"],
+                output_hidden_states=True
+            )
+        
         log = {}
         
         Q = distiller.Q
         kd_loss, log = self.compute_sedi_distillation_loss(
-            Q, outputs, teacher_outputs, input_data, output_data, distiller, log
+            Q, outputs, teacher_outputs, sft_outputs, input_data, output_data, distiller, log
         )
         
         log["kd_loss"] = kd_loss
@@ -472,11 +593,12 @@ class SEDILogitDistillation(CrossEntropyLoss):
 
         print("=============================================================\n")
 
-    def compute_sedi_distillation_loss(self, Q, outputs, teacher_outputs, inputs, output_data, distiller, log
+    def compute_sedi_distillation_loss(self, Q, outputs, teacher_outputs, sft_outputs, inputs, output_data, distiller, log
     ):
         target = output_data["label"]
         teacher_target = output_data[f"teacher_{distiller.teacher_model_type}_label"]
         student_logits = outputs.logits 
+        sft_logits = sft_outputs.logits 
         student_tokenizer = distiller.student_tokenizer
         teacher_tokenizer = distiller.teacher_tokenizers[distiller.teacher_model_type]
         
@@ -526,9 +648,10 @@ class SEDILogitDistillation(CrossEntropyLoss):
                     tea_input_ids = tea_input_ids[:end_teacher_len+1]
             teacher_logits_projected = torch.matmul(tea_per_step_logits.to(Q.dtype), Q)  
             student_per_step_logit = student_logits[i, stu_content_idx[:end_student_len+1], :].to(Q.dtype)
+            sft_per_step_logit = sft_logits[i, stu_content_idx[:end_student_len+1], :].to(Q.dtype)
             
             aligned, tokenizer_aligned_output = sliding_window_align_onlyQ(self.args,self.K, mask_id, student_tokenizer, teacher_tokenizer, stu_input_ids[1:], tea_input_ids[1:], merged, student_per_step_logit, \
-                tea_per_step_logits[1:].to(Q.dtype), teacher_logits_projected[1:].to(Q.dtype), teacher_special_token, student_special_token, tea_per_step_logits[0,:].unsqueeze(0))
+                tea_per_step_logits[1:].to(Q.dtype), teacher_logits_projected[1:].to(Q.dtype), teacher_special_token, student_special_token, tea_per_step_logits[0,:].unsqueeze(0), distiller.student_model, sft_per_step_logit)
             assert tokenizer_aligned_output.size(0) == aligned.size(0)
             next_token_ids_post = torch.argmax(aligned, dim=-1)
             tag = torch.ones_like(next_token_ids_post[:-1], dtype=torch.bool).to(next_token_ids_post.device)
@@ -570,7 +693,8 @@ class SEDILogitDistillation(CrossEntropyLoss):
             output_data["label"],
             log=log
         )
-        log["kl_loss"] = kl_loss + entropy_loss
-        return kl_loss+entropy_loss, log
+        log["kl_loss"] = kl_loss 
+        # + entropy_loss
+        return kl_loss, log
 
     
