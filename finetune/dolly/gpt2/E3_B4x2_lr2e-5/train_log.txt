@@ -1,3 +1,0 @@
-dev | {'loss': 2.53594, 'token_num': 23901, 'token_acc': 0.49454, 'top1_prob': 0.497981} | {'exact_match': 0.8889, 'rougeL': 16.0085, 'f1': 13.2364, 'bleu': 3.0809, 'fluency': 4.7055}
-dev | {'loss': 2.518493, 'token_num': 23901, 'token_acc': 0.494414, 'top1_prob': 0.505669} | {'exact_match': 1.3333, 'rougeL': 16.8342, 'f1': 14.2726, 'bleu': 3.3023, 'fluency': 4.9428}
-dev | {'loss': 2.516694, 'token_num': 23901, 'token_acc': 0.494875, 'top1_prob': 0.511422} | {'exact_match': 1.6667, 'rougeL': 17.696, 'f1': 15.058, 'bleu': 4.0181, 'fluency': 4.9795}

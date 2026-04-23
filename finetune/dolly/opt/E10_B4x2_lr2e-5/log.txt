@@ -1,5 +1,0 @@
-valid | name: uinst | {'exact_match': 0.5, 'rougeL': 16.3264} | lm_loss 2.5831 | avg. gen lenth: 55.96 | seed 10
-test | name: dolly | {'exact_match': 2.8, 'rougeL': 21.1502} | lm_loss 2.463 | avg. gen lenth: 72.208 | seed 10
-valid | name: vicuna | {'exact_match': 0.0, 'rougeL': 14.2599} | lm_loss 2.2019 | avg. gen lenth: 135.775 | seed 10
-valid | name: self-inst | {'exact_match': 0.8264, 'rougeL': 9.9609} | lm_loss 3.487 | avg. gen lenth: 90.48760330578513 | seed 10
-valid | name: sinst/6_10 | {'exact_match': 0.1368, 'rougeL': 14.5065} | lm_loss 3.4405 | avg. gen lenth: 55.53077975376197 | seed 10
